@@ -17,7 +17,6 @@ class PhpsecServer implements Server
 	private ?string $passPhrase;
 	private ?SFTP $sftp = null;
 
-
 	public function __construct(
 		string $url,
 		string $publicKey = null,
@@ -34,7 +33,6 @@ class PhpsecServer implements Server
 		$this->privateKey = $privateKey;
 		$this->passPhrase = $passPhrase;
 	}
-
 
 	public function connect(): void
 	{
@@ -55,14 +53,12 @@ class PhpsecServer implements Server
 		$this->sftp = $sftp;
 	}
 
-
 	public function readFile(string $remote, string $local): void
 	{
 		if ($this->sftp->get($remote, $local) === false) {
 			throw new ServerException('Unable to read file');
 		}
 	}
-
 
 	public function writeFile(string $local, string $remote, callable $progress = null): void
 	{
@@ -76,7 +72,6 @@ class PhpsecServer implements Server
 		}
 	}
 
-
 	public function removeFile(string $file): void
 	{
 		if ($this->sftp->file_exists($file)) {
@@ -85,7 +80,6 @@ class PhpsecServer implements Server
 			}
 		}
 	}
-
 
 	public function renameFile(string $old, string $new): void
 	{
@@ -105,7 +99,6 @@ class PhpsecServer implements Server
 		}
 	}
 
-
 	public function createDir(string $dir): void
 	{
 		if ($dir !== '' && !$this->sftp->file_exists($dir)) {
@@ -118,7 +111,6 @@ class PhpsecServer implements Server
 		}
 	}
 
-
 	public function removeDir(string $dir): void
 	{
 		if ($this->sftp->file_exists($dir)) {
@@ -127,7 +119,6 @@ class PhpsecServer implements Server
 			}
 		}
 	}
-
 
 	public function purge(string $path, callable $progress = null): void
 	{
@@ -138,14 +129,12 @@ class PhpsecServer implements Server
 		}
 	}
 
-
 	public function chmod(string $path, int $permissions): void
 	{
 		if ($this->sftp->chmod($permissions, $path) === false) {
 			throw new ServerException('Unable to chmod file');
 		}
 	}
-
 
 	public function getDir(): string
 	{
