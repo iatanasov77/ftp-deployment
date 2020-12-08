@@ -141,7 +141,6 @@ class PhpsecServer implements Server
 		return isset($this->url['path']) ? rtrim($this->url['path'], '/') : '';
 	}
 
-
 	public function execute(string $command): string
 	{
 		return $this->sftp->exec($command);
