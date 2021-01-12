@@ -48,6 +48,7 @@ class JobRunner
 			} elseif ($cmd === 'unlink') {
 				$this->server->removeFile($a);
 			} elseif ($cmd === 'mv') {
+				$b = '/' . ltrim($b, '/');
 				$this->server->renameFile($a, $b);
 			} elseif ($cmd === 'chmod') {
 				$this->server->chmod($b, octdec($m[2]));
