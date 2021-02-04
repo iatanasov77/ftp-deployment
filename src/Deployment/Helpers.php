@@ -16,7 +16,6 @@ namespace Deployment;
  */
 class Helpers
 {
-
 	/**
 	 * Computes hash.
 	 */
@@ -85,6 +84,7 @@ class Helpers
 			$options = [
 				CURLOPT_RETURNTRANSFER => 1,
 				CURLOPT_FOLLOWLOCATION => 1,
+				CURLOPT_USERAGENT => 'Mozilla/5.0 FTP-deployment',
 			];
 			if ($postData !== null) {
 				$options[CURLOPT_POST] = true;
@@ -107,7 +107,7 @@ class Helpers
 				],
 			]));
 			$error = $output === false
-				? preg_replace("#^file_get_contents\(.*?\): #", '', error_get_last()['message'])
+				? preg_replace('#^file_get_contents\\(.*?\\): #', '', error_get_last()['message'])
 				: null;
 		}
 		return (string) $output;

@@ -93,18 +93,28 @@ class CliRunner
 			if (!$deployment->allowDelete) {
 				$this->logger->log('Deleting disabled');
 			}
-			$deployment->deploy();
+
+			try {
+				$deployment->deploy();
+			} catch (JobException | ServerException $e) {
+				$this->logger->log("Error: {$e->getMessage()} in {$e->getFile()}:{$e->getLine()}\n\n$e", 'red');
+			}
+			$this->logger->log("\n\n");
 		}
 
 		$time = time() - $time;
-		$this->logger->log("\nFinished at " . date('[Y/m/d H:i]') . " (in $time seconds)", 'lime');
+		$this->logger->log('Finished at ' . date('[Y/m/d H:i]') . " (in $time seconds)\n----------------------------------------------\n\n", 'lime');
 		return 0;
 	}
 
 
 	private function createDeployer(array $config): Deployer
 	{
-		if (empty($config['remote']) || !($urlParts = parse_url($config['remote'])) || !isset($urlParts['scheme'], $urlParts['host'])) {
+		if (
+			empty($config['remote'])
+			|| !($urlParts = parse_url($config['remote']))
+			|| !isset($urlParts['scheme'], $urlParts['host'])
+		) {
 			throw new \Exception("Missing or invalid 'remote' URL in config.");
 		}
 		if (isset($config['user'])) {
@@ -118,13 +128,23 @@ class CliRunner
 			$this->logger->log('Note: connection is not encrypted', 'white/red');
 		}
 
-		if ($urlParts['scheme'] === 'sftp') {
-			$server = new SshServer(Helpers::buildUrl($urlParts));
+		if ($urlParts['scheme'] === 'phpsec') {
+			$server = new PhpsecServer(Helpers::buildUrl($urlParts), $config['publickey'] ?? null, $config['privatekey'] ?? null, $config['passphrase'] ?? null);
+		} elseif ($urlParts['scheme'] === 'sftp') {
+			$server = new SshServer(Helpers::buildUrl($urlParts), $config['publickey'] ?? null, $config['privatekey'] ?? null, $config['passphrase'] ?? null);
 		} elseif ($urlParts['scheme'] === 'file') {
 			$server = new FileServer($config['remote']);
 		} else {
 			$server = new FtpServer(Helpers::buildUrl($urlParts), (bool) $config['passivemode']);
 		}
+		$server->filePermissions = empty($config['filepermissions'])
+			? null
+			: octdec($config['filepermissions']);
+		$server->dirPermissions = empty($config['dirpermissions'])
+			? null
+			: octdec($config['dirpermissions']);
+
+		$server = new RetryServer($server, $this->logger);
 
 		if (!preg_match('#/|\\\\|[a-z]:#iA', $config['local'])) {
 			$config['local'] = dirname($this->configFile) . '/' . $config['local'];
@@ -133,7 +153,9 @@ class CliRunner
 		$deployment = new Deployer($server, $config['local'], $this->logger);
 
 		if ($config['preprocess']) {
-			$deployment->preprocessMasks = $config['preprocess'] == 1 ? ['*.js', '*.css'] : self::toArray($config['preprocess']); // intentionally ==
+			$deployment->preprocessMasks = $config['preprocess'] == 1
+				? ['*.js', '*.css']
+				: self::toArray($config['preprocess']); // intentionally ==
 			$preprocessor = new Preprocessor($this->logger);
 			$deployment->addFilter('js', [$preprocessor, 'expandApacheImports']);
 			$deployment->addFilter('js', [$preprocessor, 'compressJs'], true);
@@ -143,17 +165,16 @@ class CliRunner
 		}
 
 		$deployment->includeMasks = self::toArray($config['include'], true);
-		$deployment->ignoreMasks = array_merge($this->ignoreMasks, self::toArray($config['ignore']));
-		$deployment->deploymentFile = empty($config['deploymentfile']) ? $deployment->deploymentFile : $config['deploymentfile'];
+		$deployment->ignoreMasks = array_merge(self::toArray($config['ignore']), $this->ignoreMasks);
+		$deployment->deploymentFile = empty($config['deploymentfile'])
+			? $deployment->deploymentFile
+			: $config['deploymentfile'];
 		$deployment->allowDelete = $config['allowdelete'];
 		$deployment->toPurge = self::toArray($config['purge'], true);
 		$deployment->runBefore = self::toArray($config['before'], true);
 		$deployment->runAfterUpload = self::toArray($config['afterupload'], true);
 		$deployment->runAfter = self::toArray($config['after'], true);
 		$deployment->testMode = !empty($config['test']) || $this->mode === 'test';
-
-		$server->filePermissions = empty($config['filepermissions']) ? null : octdec($config['filepermissions']);
-		$server->dirPermissions = empty($config['dirpermissions']) ? null : octdec($config['dirpermissions']);
 
 		return $deployment;
 	}
@@ -173,21 +194,24 @@ class CliRunner
 				$message = html_entity_decode(strip_tags($message));
 			}
 
-			$trace = debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS);
-			if (isset($trace[2]['class']) && is_a($trace[2]['class'], 'Deployment\Server', true)) {
-				if (preg_match('#^\w+\(\):\s*(.+)#', $message, $m)) {
-					$message = $m[1];
-				}
-				throw new ServerException($message);
-			}
-
 			throw new \ErrorException($message, 0, $severity, $file, $line);
 		});
 
-		set_exception_handler(function ($e) {
+		set_exception_handler(function (\Throwable $e): void {
 			$this->logger->log("Error: {$e->getMessage()} in {$e->getFile()}:{$e->getLine()}\n\n$e", 'red');
 			exit(1);
 		});
+
+		if (extension_loaded('pcntl')) {
+			pcntl_signal(SIGINT, function (): void {
+				pcntl_signal(SIGINT, SIG_DFL);
+				throw new \Exception('Terminated');
+			});
+		} elseif (function_exists('sapi_windows_set_ctrl_handler')) {
+			sapi_windows_set_ctrl_handler(function () {
+				throw new \Exception('Terminated');
+			});
+		}
 	}
 
 
@@ -195,7 +219,7 @@ class CliRunner
 	{
 		$cmd = new CommandLine(<<<'XX'
 
-FTP deployment v3.0
+FTP deployment v3.3
 -------------------
 Usage:
 	deployment <config_file> [-t | --test]
@@ -217,16 +241,18 @@ XX
 		}
 
 		$options = $cmd->parse();
-		$this->mode = $options['--generate'] ? 'generate' : ($options['--test'] ? 'test' : null);
+		$this->mode = $options['--generate']
+			? 'generate'
+			: ($options['--test'] ? 'test' : null);
 		$this->configFile = $options['config'];
-
-		if (!flock($this->lock = fopen($options['config'], 'r'), LOCK_EX | LOCK_NB)) {
-			throw new \Exception('It seems that you are in the middle of another deployment.');
-		}
 
 		$config = $this->loadConfigFile($options['config']);
 		if (!$config) {
 			throw new \Exception('Missing config.');
+		}
+
+		if (!flock($this->lock = fopen($options['config'], 'r'), LOCK_EX | LOCK_NB)) {
+			throw new \Exception('It seems that you are in the middle of another deployment.');
 		}
 
 		$this->batches = isset($config['remote']) && is_string($config['remote'])

@@ -107,7 +107,11 @@ class Deployer
 		}
 
 		$this->logger->log("Scanning files in $this->localDir");
-		$localPaths = $this->collectPaths();
+		static $cache;
+		$localPaths = &$cache[serialize([$this->localDir, $this->ignoreMasks, $this->includeMasks, $this->filters, $this->preprocessMasks])];
+		if ($localPaths === null) {
+			$localPaths = $this->collectPaths();
+		}
 
 		unset($localPaths["/$this->deploymentFile"], $remotePaths["/$this->deploymentFile"]);
 		$toDelete = $this->allowDelete ? array_keys(array_diff_key($remotePaths, $localPaths)) : [];
@@ -120,21 +124,22 @@ class Deployer
 
 		if (!$toUpload && !$toDelete) {
 			$this->logger->log('Already synchronized.', 'lime');
+
+			$runAfterLocal = array_filter($this->runAfter, function ($job) { return is_string($job) && preg_match('#^local:#', $job); });
+			if ($runAfterLocal) {
+				$this->logger->log("\nLocal-after-jobs:");
+				$this->runJobs($runAfterLocal);
+			}
 			return;
 
 		} elseif ($this->testMode) {
-			$this->logger->log("\nUploading:\n" . implode("\n", $toUpload), 'green', false);
-			$this->logger->log("\nDeleting:\n" . implode("\n", $toDelete), 'maroon', false);
+			$this->logger->log("\nUploading:\n" . implode("\n", $toUpload), 'green', 0);
+			$this->logger->log("\nDeleting:\n" . implode("\n", $toDelete), 'maroon', 0);
 			if (isset($deploymentFile)) {
 				unlink($deploymentFile);
 			}
 			return;
 		}
-
-		$this->logger->log("Creating remote file $this->deploymentFile.running");
-		$runningFile = "$this->remoteDir/$this->deploymentFile.running";
-		$this->server->createDir(str_replace('\\', '/', dirname($runningFile)));
-		$this->server->writeFile(tempnam($this->tempDir, 'deploy'), $runningFile);
 
 		if ($runBefore[0]) {
 			$this->logger->log("\nBefore-jobs:");
@@ -148,34 +153,47 @@ class Deployer
 				$this->logger->log("\nAfter-upload-jobs:");
 				$this->runJobs($this->runAfterUpload);
 			}
-			$this->logger->log("\nRenaming:");
-			$this->renamePaths($toUpload);
-			unlink($deploymentFile);
 		}
 
-		if ($toDelete) {
-			$this->logger->log("\nDeleting:");
-			$this->deletePaths($toDelete);
-		}
+		$this->logger->log("Creating remote file $this->deploymentFile.running");
+		$runningFile = "$this->remoteDir/$this->deploymentFile.running";
+		$this->server->createDir(str_replace('\\', '/', dirname($runningFile)));
+		$this->server->writeFile(tempnam($this->tempDir, 'deploy'), $runningFile);
 
-		foreach ($this->toPurge as $path) {
-			$this->logger->log("\nCleaning $path");
-			$this->server->purge($this->remoteDir . '/' . $path, function ($path) {
-				static $counter;
-				$path = (string) substr($path, strlen($this->remoteDir));
-				$path = preg_match('#/(.{1,60})$#', $path, $m) ? $m[1] : substr(basename($path), 0, 60);
-				$this->logger->progress(str_pad($path . ' ' . str_repeat('.', $counter++ % 30 + 60 - strlen($path)), 90));
-			});
-			$this->logger->progress(str_repeat(' ', 91));
-		}
+		try {
+			if ($toUpload) {
+				$this->logger->log("\nRenaming:");
+				$this->renamePaths($toUpload);
+				unlink($deploymentFile);
+			}
 
-		if ($this->runAfter) {
-			$this->logger->log("\nAfter-jobs:");
-			$this->runJobs($this->runAfter);
-		}
+			if ($toDelete) {
+				$this->logger->log("\nDeleting:");
+				$this->deletePaths($toDelete);
+			}
 
-		$this->logger->log("\nDeleting remote file $this->deploymentFile.running");
-		$this->server->removeFile($runningFile);
+			foreach ($this->toPurge as $path) {
+				$this->logger->log("\nCleaning $path");
+				$this->server->purge($this->remoteDir . '/' . $path, function ($path) {
+					static $counter;
+					$path = (string) substr($path, strlen($this->remoteDir));
+					$path = preg_match('#/(.{1,60})$#', $path, $m)
+						? $m[1]
+						: substr(basename($path), 0, 60);
+					$this->logger->progress(str_pad($path . ' ' . str_repeat('.', $counter++ % 30 + 60 - strlen($path)), 90));
+				});
+				$this->logger->progress(str_repeat(' ', 91));
+			}
+
+			if ($this->runAfter) {
+				$this->logger->log("\nAfter-jobs:");
+				$this->runJobs($this->runAfter);
+			}
+
+		} finally {
+			$this->logger->log("\nDeleting remote file $this->deploymentFile.running");
+			$this->server->removeFile($runningFile);
+		}
 	}
 
 
@@ -196,7 +214,11 @@ class Deployer
 	{
 		$tempFile = tempnam($this->tempDir, 'deploy');
 		try {
-			$this->server->readFile($this->remoteDir . '/' . $this->deploymentFile, $tempFile);
+			if ($this->server instanceof RetryServer) {
+				$this->server->noRetry('readFile', $this->remoteDir . '/' . $this->deploymentFile, $tempFile);
+			} else {
+				$this->server->readFile($this->remoteDir . '/' . $this->deploymentFile, $tempFile);
+			}
 		} catch (ServerException $e) {
 			return null;
 		}
@@ -237,7 +259,9 @@ class Deployer
 		foreach ($paths as $num => $path) {
 			$remotePath = $this->remoteDir . $path;
 			$isDir = substr($remotePath, -1) === '/';
-			$remoteDir = $isDir ? substr($remotePath, 0, -1) : str_replace('\\', '/', dirname($remotePath));
+			$remoteDir = $isDir
+				? substr($remotePath, 0, -1)
+				: str_replace('\\', '/', dirname($remotePath));
 			if ($remoteDir !== $prevDir) {
 				$prevDir = $remoteDir;
 				$this->server->createDir($remoteDir);
@@ -356,18 +380,29 @@ class Deployer
 
 		$full = $this->localDir . str_replace('/', DIRECTORY_SEPARATOR, $file);
 		$content = file_get_contents($full);
+
 		foreach ($this->filters[$ext] as $info) {
-			if ($info['cached'] && is_file($tempFile = $this->tempDir . '/' . md5($content))) {
-				$content = file_get_contents($tempFile);
+			is_callable($info['filter'], false, $callable_name);
+			$cacheFile = $info['cached']
+				? $this->tempDir . '/' . md5($content . $callable_name)
+				: null;
+
+			if ($cacheFile && is_file($cacheFile)) {
+				$content = file_get_contents($tempFile = $cacheFile);
 			} else {
-				$content = $info['filter']($content, $full);
-				if ($info['cached']) {
-					file_put_contents($tempFile, $content);
+				$res = $info['filter']($content, $full);
+				if ($res !== null) {
+					$content = $res;
+					if ($cacheFile) {
+						file_put_contents($tempFile = $cacheFile, $content);
+					} else {
+						$tempFile = null;
+					}
 				}
 			}
 		}
 
-		if (empty($info['cached'])) {
+		if (empty($tempFile)) {
 			$tempFile = tempnam($this->tempDir, 'deploy');
 			file_put_contents($tempFile, $content);
 		}
@@ -380,52 +415,40 @@ class Deployer
 	 */
 	private function runJobs(array $jobs): void
 	{
+		$runner = new JobRunner($this->server, $this->localDir, $this->remoteDir);
+
 		foreach ($jobs as $job) {
-			if (is_string($job) && preg_match('#^(https?|local|remote|upload):\s*(.+)#', $job, $m)) {
+			if (is_string($job) && preg_match('#^(https?|local|remote|upload|download):\s*(.+)#', $job, $m)) {
 				$this->logger->log($job);
-				$out = $err = null;
-				if ($m[1] === 'local') {
-					@exec($m[2], $out, $code);
-					$out = trim(implode("\n", $out));
-					$err = $code !== 0 ? "exit code $code" : null;
-
-				} elseif ($m[1] === 'remote') {
-					$out = $this->server->execute($m[2]);
-
-				} elseif ($m[1] === 'upload') {
-					[$localFile, $remotePath] = explode(' ', $m[2]);
-					$localFile = $this->localDir . '/' . $localFile;
-					if (!is_file($localFile)) {
-						throw new \RuntimeException("File $localFile doesn't exist.");
-					}
-					$remotePath = $this->remoteDir . '/' . $remotePath;
-					$this->server->createDir(str_replace('\\', '/', dirname($remotePath)));
-					$this->server->writeFile($localFile, $remotePath);
-				} else {
-					$out = Helpers::fetchUrl($job, $err);
-				}
+				$method = $m[1] === 'https' ? 'http' : $m[1];
+				[$out, $err] = $runner->$method($m[2]);
 
 				if ($out != null) { // intentionally ==
-					$this->logger->log("-> $out", 'gray');
+					$this->logger->log("-> $out", 'gray', -3);
 				}
 				if ($err) {
-					throw new \RuntimeException('Job failed, ' . $err);
+					throw new JobException('Job failed, ' . $err);
 				}
 
 			} elseif (is_callable($job)) {
 				if ($job($this->server, $this->logger, $this) === false) {
-					throw new \RuntimeException('Job failed');
+					throw new JobException('Job failed');
 				}
 
 			} else {
-				throw new \InvalidArgumentException("Invalid job $job.");
+				throw new \InvalidArgumentException("Invalid job $job, must start with http:, local:, remote: or upload:");
 			}
 		}
 	}
 
 
-	private function writeProgress(int $count, int $total, string $path, float $percent = null, string $color = null): void
-	{
+	private function writeProgress(
+		int $count,
+		int $total,
+		string $path,
+		float $percent = null,
+		string $color = null
+	): void {
 		$len = strlen((string) $total);
 		$s = sprintf("(% {$len}d of %-{$len}d) %s", $count, $total, $path);
 		if ($percent === null) {

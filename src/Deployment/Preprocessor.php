@@ -13,11 +13,16 @@ namespace Deployment;
 
 /**
  * CSS and JS preprocessors.
+ *
+ * It has a dependency on the error handler that converts PHP errors to ErrorException.
  */
 class Preprocessor
 {
-	/** @var string  path to java binary */
-	public $javaBinary = 'java';
+	/** @var string|null  path to UglifyJS binary */
+	public $uglifyJsBinary = 'uglifyjs';
+
+	/** @var string|null  path to clean-css binary */
+	public $cleanCssBinary = 'cleancss';
 
 	/** @var bool  compress only file when contains /**! */
 	public $requireCompressMark = true;
@@ -35,28 +40,21 @@ class Preprocessor
 	/**
 	 * Compress JS file.
 	 */
-	public function compressJs(string $content, string $origFile): string
+	public function compressJs(string $content, string $origFile): ?string
 	{
-		if ($this->requireCompressMark && !preg_match('#/\*+!#', $content)) { // must contain /**!
-			return $content;
+		if (!$this->uglifyJsBinary
+			|| ($this->requireCompressMark && !preg_match('#/\*+!#', $content)) // must contain /**!
+		) {
+			return null;
 		}
 		$this->logger->log("Compressing $origFile");
 
-		$compilerPath = \Phar::running()
-			? dirname(\Phar::running(false)) . '/compiler.jar'
-			: dirname(__DIR__) . '/vendor/Google-Closure-Compiler/compiler.jar';
-
-		if (!is_file($compilerPath)) {
-			$this->logger->log("Unable to minify, Google Closure Compiler not found at $compilerPath", 'red');
-			return $content;
-		}
-
-		$cmd = escapeshellarg($this->javaBinary) . ' -jar ' . escapeshellarg($compilerPath) . ' --warning_level QUIET';
-		[$ok, $output] = $this->execute($cmd, $content);
+		$cmd = escapeshellarg($this->uglifyJsBinary) . ' --compress --mangle';
+		[$ok, $output] = $this->execute($cmd, $content, false);
 		if (!$ok) {
-			$this->logger->log("Error while executing $cmd", 'red');
+			$this->logger->log("Error while executing $this->uglifyJsBinary, install Node.js and uglify-es.", 'red');
 			$this->logger->log($output);
-			return $content;
+			return null;
 		}
 		return $output;
 	}
@@ -65,36 +63,41 @@ class Preprocessor
 	/**
 	 * Compress CSS file.
 	 */
-	public function compressCss(string $content, string $origFile): string
+	public function compressCss(string $content, string $origFile): ?string
 	{
-		if ($this->requireCompressMark && !preg_match('#/\*+!#', $content)) { // must contain /**!
-			return $content;
+		if (!$this->cleanCssBinary
+			|| ($this->requireCompressMark && !preg_match('#/\*+!#', $content)) // must contain /**!
+		) {
+			return null;
 		}
 		$this->logger->log("Compressing $origFile");
 
-		$data = [
-			'code' => $content,
-			'type' => 'css',
-			'options' => [
-				'advanced' => true,
-				'aggressiveMerging' => true,
-				'rebase' => false,
-				'processImport' => false,
-				'compatibility' => 'ie8',
-				'keepSpecialComments' => '1',
-			],
-		];
-		$output = Helpers::fetchUrl('https://refresh-sf.herokuapp.com/css/', $error, $data);
-		if ($error) {
-			$this->logger->log("Unable to minify: $error\n", 'red');
-			return $content;
+		if ($error = $this->checkCssClean()) {
+			$this->logger->log($error, 'red');
+			$this->cleanCssBinary = null;
+			return null;
 		}
-		$json = @json_decode($output, true);
-		if (!isset($json['code'])) {
-			$this->logger->log("Unable to minify. Server response: $output\n", 'red');
-			return $content;
+
+		$cmd = escapeshellarg($this->cleanCssBinary) . ' --compatibility ie9 -O2';
+		[$ok, $output] = $this->execute($cmd, $content, false);
+		if (!$ok) {
+			$this->logger->log("Error while executing $cmd", 'red');
+			$this->logger->log($output);
+			return null;
 		}
-		return $json['code'];
+		return $output;
+	}
+
+
+	private function checkCssClean(): ?string
+	{
+		[$ok, $output] = $this->execute(escapeshellarg($this->cleanCssBinary) . ' --version', '', false);
+		if (!$ok) {
+			return "Error while executing $this->cleanCssBinary, install Node.js and clean-css-cli.";
+		} elseif (version_compare($output, '4.2', '<')) {
+			return 'Update to clean-css-cli 4.2 or newer';
+		}
+		return null;
 	}
 
 
@@ -107,9 +110,11 @@ class Preprocessor
 		return preg_replace_callback('#@import\s+(?:url)?[(\'"]+(.+)[)\'"]+;#U', function ($m) use ($dir) {
 			$file = $dir . '/' . $m[1];
 			if (!is_file($file)) {
+				$this->logger->log("Expanding file $file not found!", 'red');
 				return $m[0];
 			}
 
+			$this->logger->log("Including $file");
 			$s = file_get_contents($file);
 			$newDir = dirname($file);
 			$s = $this->expandCssImports($s, $file);
@@ -134,10 +139,13 @@ class Preprocessor
 		$dir = dirname($origFile);
 		return preg_replace_callback('~<!--#include\s+file="(.+)"\s+-->~U', function ($m) use ($dir) {
 			$file = $dir . '/' . $m[1];
-			if (is_file($file)) {
-				return $this->expandApacheImports(file_get_contents($file), dirname($file));
+			if (!is_file($file)) {
+				$this->logger->log("Expanding file $file not found!", 'red');
+				return $m[0];
 			}
-			return $m[0];
+
+			$this->logger->log("Including $file");
+			return $this->expandApacheImports(file_get_contents($file), $file);
 		}, $content);
 	}
 
@@ -145,19 +153,18 @@ class Preprocessor
 	/**
 	 * Executes command.
 	 * @return array  [success, output]
-	 * @throws \Exception
+	 * @throws \ErrorException
 	 */
-	private function execute(string $command, string $input): array
+	private function execute(string $command, string $input, bool $bypassShell = true): array
 	{
 		$process = proc_open(
 			$command,
 			[['pipe', 'r'], ['pipe', 'w'], ['pipe', 'w']],
 			$pipes,
-			null, null, ['bypass_shell' => true]
+			null,
+			null,
+			['bypass_shell' => $bypassShell]
 		);
-		if (!is_resource($process)) {
-			throw new \Exception("Unable start process $command.");
-		}
 
 		fwrite($pipes[0], $input);
 		fclose($pipes[0]);
@@ -165,6 +172,8 @@ class Preprocessor
 		if (!$output) {
 			$output = stream_get_contents($pipes[2]);
 		}
+		$output = str_replace("\r\n", "\n", $output);
+		$output = trim($output);
 
 		return [
 			proc_close($process) === 0,

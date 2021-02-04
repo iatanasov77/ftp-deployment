@@ -13,10 +13,12 @@
 	],
 	"require": {
 		"php": ">=7.1",
-		"ext-zlib": "*"
+		"ext-zlib": "*",
+		"phpseclib/phpseclib": "^2.0"
 	},
 	"require-dev": {
-		"nette/tester": "~1.3"
+		"nette/tester": "^2.0",
+		"phpstan/phpstan": "^0.12"
 	},
 	"suggest": {
 		"ext-ftp": "to connect to ftp:// server",

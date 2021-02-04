@@ -18,16 +18,27 @@ after_failure:
 
 jobs:
     include:
-        -   stage: Code Standard Checker
+        -   name: Nette Code Checker
             install:
-                # Install Nette Code Checker
-                - travis_retry composer create-project nette/code-checker temp/code-checker ~2 --no-progress
-                # Install Nette Coding Standard
-                - travis_retry composer create-project nette/coding-standard temp/coding-standard --no-progress
-
+                - travis_retry composer create-project nette/code-checker temp/code-checker ^3 --no-progress
             script:
-                - php temp/code-checker/src/code-checker.php --short-arrays
-                - php temp/coding-standard/ecs check src tests --config temp/coding-standard/coding-standard-php56.neon
+                - php temp/code-checker/code-checker --strict-types
+
+
+        -   name: Nette Coding Standard
+            install:
+                - travis_retry composer create-project nette/coding-standard temp/coding-standard ^2 --no-progress
+            script:
+                - php temp/coding-standard/ecs check src tests --config temp/coding-standard/coding-standard-php71.yml
+
+
+        -   stage: Static Analysis (informative)
+            script:
+                - vendor/bin/phpstan analyse --level 5 src
+
+
+    allow_failures:
+        -   stage: Static Analysis (informative)
 
 
 sudo: false

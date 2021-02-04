@@ -1,4 +1,4 @@
-FTP Deployment: smart upload [![Buy me a coffee](https://files.nette.org/images/coffee1s.png)](https://www.paypal.com/cgi-bin/webscr?cmd=_s-xclick&hosted_button_id=EVVM5U5T47AA2)
+FTP Deployment: smart upload [![Buy me a coffee](https://files.nette.org/images/coffee1s.png)](https://nette.org/make-donation?to=deployment)
 ====================================
 
 [![Downloads this Month](https://img.shields.io/packagist/dm/dg/ftp-deployment.svg)](https://packagist.org/packages/dg/ftp-deployment)
@@ -15,6 +15,18 @@ and then trying to keep some kind of synchronization is even worse ;-)
 Once the process is automated, it costs you a fraction of time and minimizes the risk of error
 (didn't I forget to upload some files?). There are lots of sophisticated deploying techniques available today,
 but many people are still using FTP. This tool is designed for them.
+
+
+Support Project
+---------------
+
+Do you like FTP Deployment? Are you looking forward to the new features?
+
+[![Donate](https://files.nette.org/icons/donation-1.svg?)](https://nette.org/make-donation?to=deployment)
+
+
+How it Works
+------------
 
 FTP Deployment is a script written in PHP and will automate
 the entire process. Just say which local folder to upload and where. This
@@ -40,7 +52,7 @@ colors = yes
 [my site] ; Optional section (there may be more than one section).
 ; remote FTP server
 remote = ftp://user:secretpassword@ftp.example.com/directory
-; you can use ftps://, sftp:// or file:// protocols (sftp requires SSH2 extension)
+; you can use ftps://, sftp://, file:// or phpsec:// protocols (sftp requires SSH2 extension; phpsec uses phpseclib library)
 
 ; do not like to specify user & password in 'remote'? Use these options:
 user = ...
@@ -76,6 +88,9 @@ include = "
 allowDelete = yes
 
 ; jobs to run before uploading
+; local jobs are done even if there is no need for synchronization
+before[] = local: git diff-index --quiet HEAD  ; ensures Git working directory is clean
+before[] = local: composer install --no-dev --classmap-authoritative  ; installs production vendor
 before[] = local: lessc assets/combined.less assets/combined.css
 before[] = http://example.com/deployment.php?before
 
@@ -86,19 +101,30 @@ afterUpload[] = http://example.com/deployment.php?afterUpload
 purge[] = temp/cache
 
 ; jobs to run after everything (upload, rename, delete, purge) is done
+; local jobs are done even if the synchronization did not take place
 after[] = remote: unzip api.zip
 after[] = remote: chmod 0777 temp/cache  ; change permissions
 after[] = upload: config.server.neon app/config.local.neon
 after[] = http://example.com/deployment.php?after
+after[] = local: git reset HEAD --hard   ; reverts all changes in working directory
 
 ; files to preprocess (defaults to none)
 preprocess = *.js *.css
 
 ; file which contains hashes of all uploaded files (defaults to .htdeployment)
 deploymentFile = .deployment
+
+; default permissions for new files (defaults to none)
+filePermissions = 0644
+
+; default permissions for new directories (defaults to none)
+dirPermissions = 0755
 ```
 
-Configuration can also be stored in a PHP file.
+In the config file you can create multiple sections (like `[my site]`), so you may have separate
+rules for data and for application.
+
+Configuration can also be stored in a [PHP file](deployment.sample.php).
 
 In test mode (with `-t` option) uploading or deleting files is skipped, so you can use it
 to verify your settings.
@@ -116,17 +142,32 @@ project.pp[jx] - ignore files or folders 'project.ppj' and 'project.ppx'
 
 Before the upload starts, after it finishes and after all jobs, you can execute commands or call your scripts on
 the server (see `before`, `afterUpload`, `after`), which can, for example, switch the server to a maintenance mode.
-If you use php-config - you can run lambda function with deployment environment.
+If you use PHP config, you can run lambda function with deployment environment:
+
+```php
+<?php
+
+return [
+	'remote' => 'ftp://user:secretpassword@ftp.example.com/directory',
+	'local' => '.',
+	'before' => [
+		function (Deployment\Server $server, Deployment\Logger $logger, Deployment\Deployer $deployer) {
+			... do something
+		},
+	],
+	...
+];
+```
 
 Syncing a large number of files attempts to run in (something like) a transaction: all files are
 uploaded with extension `.deploytmp` and then quickly renamed.
 
 An `.htdeployment` file is uploaded to the server, which contains MD5 hashes of all the files and
 is used for synchronization. So the next time you run `deployment`, only modified files are uploaded
-and deleted files are deleted on server (if it is not forbidden by the `allowDelete` directive).
+and deleted files are deleted from server (if it is not forbidden by the `allowDelete` directive).
 
 Uploaded files can be processed by a preprocessor. These rules are predefined: `.css` files
-are compressed using the Clean-CSS (via online service) and `.js` are minified by Google Closure Compiler (via Java utility).
+are compressed using the clean-css and `.js` are minified by UglifyJS or UglifyES (both via Node.js tool).
 
 There is also a rule for expanding [mod_include](http://httpd.apache.org/docs/current/mod/mod_include.html) Apache directives.
 For example, you can create a file `combined.js`:
@@ -139,19 +180,43 @@ For example, you can create a file `combined.js`:
 
 This tool will combine scripts together and minify them with the Closure Compiler to speed-up your website.
 
-In the `deployment.ini`, you can create multiple sections, i.e. you may have separate
-rules for data and for application.
-
 
 Installing FTP Deployment
 -------------------------
 
 FTP Deployment 3.x requires PHP 7.1 or later (version 2.x requires PHP 5.4 or newer). It also requires openssl extensions for ftps:// and SSH2 extension for sftp:// connections.
 
-The easiest way to obtain FTP Deployment is to download [a single PHAR file](https://github.com/dg/ftp-deployment/releases). If you want to use JavaScript minification, download `compiler.jar` in the same folder.
+The easiest way to obtain FTP Deployment is to download [a single PHAR file](https://github.com/dg/ftp-deployment/releases).
+
+If you want to use minification, install [Node.js](https://nodejs.org/en/) and [UglifyES](https://www.npmjs.com/package/uglify-es)
+for JavaScript minification and [clean-css](https://www.npmjs.com/package/clean-css-cli) for CSS minification.
+
+```
+npm install uglify-es -g
+npm install clean-css-cli -g
+```
+
 
 Or you can install it using Composer:
 
 ```
 composer create-project dg/ftp-deployment
+```
+
+Are you looking for php_ssh2.dll?
+- [php_ssh2.dll for PHP 7.1 x86](https://files.nette.org/misc/7.1-x86/php_ssh2.dll)
+- [php_ssh2.dll for PHP 7.1 x64](https://files.nette.org/misc/7.1-x64/php_ssh2.dll)
+- [php_ssh2.dll for PHP 7.2 x86](https://files.nette.org/misc/7.2-x86/php_ssh2.dll) (seems buggy)
+- [php_ssh2.dll for PHP 7.2 x64](https://files.nette.org/misc/7.2-x64/php_ssh2.dll)
+- [php_ssh2.dll for PHP 7.3 x86](https://files.nette.org/misc/7.3-x86/php_ssh2.dll)
+- [php_ssh2.dll for PHP 7.3 x64](https://files.nette.org/misc/7.3-x64/php_ssh2.dll)
+- [php_ssh2.dll for PHP 7.4 x86](https://files.nette.org/misc/7.4-x86/php_ssh2.dll)
+- [php_ssh2.dll for PHP 7.4 x64](https://files.nette.org/misc/7.4-x64/php_ssh2.dll)
+
+Need SSH authenticate using a public key?
+
+```
+publicKey = '/key/id_rsa.pub'
+privateKey = '/key/id_rsa'
+passPhrase = 'yourpass' #optional - If needed passphrase for privateKey
 ```
