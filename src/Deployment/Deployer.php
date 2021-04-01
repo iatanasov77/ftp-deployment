@@ -420,8 +420,12 @@ class Deployer
 		foreach ($jobs as $job) {
 			if (is_string($job) && preg_match('#^(https?|local|remote|upload|download):\s*(.+)#', $job, $m)) {
 				$this->logger->log($job);
-				$method = $m[1] === 'https' ? 'http' : $m[1];
-				[$out, $err] = $runner->$method($m[2]);
+				$method = $m[1];
+				if ($method === 'http' || $method === 'https') {
+				    [$out, $err] = $runner->http($m[0]);
+				} else {
+				    [$out, $err] = $runner->$method($m[2]);
+				}
 
 				if ($out != null) { // intentionally ==
 					$this->logger->log("-> $out", 'gray', -3);
